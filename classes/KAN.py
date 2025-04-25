@@ -4,19 +4,20 @@ from BSplineActivation import BSplineActivation
 from Config import Config
 
 class KAN(nn.Module):
-    def __init__(self, input_dim=784, num_inner_functions=15, num_outer_functions=19,
-                 num_control_points=7, degree=2, range_min=-3.401, range_max=33.232):
+    def __init__(self, input_channels=3, num_inner_functions=15, num_outer_functions=19,
+                 num_control_points=7, degree=2, range_min=-1, range_max=15):
 
         super(KAN, self).__init__()
         
-        
-        self.flatten = nn.Flatten()
-        self.input_dim = input_dim
+        self.input_channels = input_channels
         self.num_inner_functions = num_inner_functions
         self.num_outer_functions = num_outer_functions
 
+        self.conv_l1 = nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, stride=1, padding=1)
+        self.conv_l2 = nn.Conv2d(in_channels=64, out_channels=256, kernel_size=3, stride=2, padding=1)
+        self.conv_l3 = nn.Conv2d(in_channels=256, out_channels=4096, kernel_size=3, stride=1, padding=1)
 
-        self.inner_scales = nn.Parameter(torch.empty(num_inner_functions, input_dim))
+        self.inner_scales = nn.Parameter(torch.empty(num_inner_functions, input_channels))
         self.inner_biases = nn.Parameter(torch.empty(num_inner_functions))
 
         self.outer_scales = nn.Parameter(torch.empty(num_outer_functions, num_inner_functions))
@@ -47,13 +48,19 @@ class KAN(nn.Module):
             nn.init.zeros_(self.outer_biases)
 
     def forward(self, x):
+        x = F.relu(self.conv_l1(x))
+        x = F.relu(self.conv_l2(x))
+        x = F.relu(self.conv_l3(x))
 
-        x = self.flatten(x)
+        # flatten
+        x = x.view(x.size(0), -1)               # (B, flat_dim)
 
-        scaled_input_lay1 = F.linear(x, self.inner_scales, self.inner_biases)
-        lay1_outputs = self.lay1(scaled_input_lay1)
+        # KAN inner
+        x1 = F.linear(x, self.inner_scales, self.inner_biases)  # (B, num_inner)
+        x1 = self.lay1(x1)
 
-        scaled_input_lay2 = F.linear(lay1_outputs, self.outer_scales, self.outer_biases)
-        outer_outputs = self.lay2(scaled_input_lay2) 
+        # KAN outer
+        x2 = F.linear(x1, self.outer_scales, self.outer_biases) # (B, num_outer)
+        x2 = self.lay2(x2)
 
-        return outer_outputs
+        return x2
