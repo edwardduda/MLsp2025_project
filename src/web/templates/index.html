@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Network Visualizer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-dark">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h1">Network Visualizer</span>
+            <span class="navbar-text d-flex align-items-center gap-2">
+                {% if model_status['loaded'] %}
+                    <span class="badge bg-success">Model Loaded</span>
+                    <span class="text-muted small">{{ model_status.get('model_type', '') }}</span>
+                {% else %}
+                    <span class="badge bg-warning">Demo Mode</span>
+                {% endif %}
+            </span>
+        </div>
+    </nav>
+
+    <div class="app-layout">
+        <!-- Sidebar: model upload + image gallery -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-section">
+                <div class="card model-upload-card">
+                    <div class="card-body">
+                        <h6 class="mb-1 text-white">Load Model</h6>
+                        <p class="text-muted mb-2 small">Upload a <code>.pt</code> or <code>.pth</code> file</p>
+                        <form id="model-upload-form" class="d-flex align-items-center gap-2 flex-wrap">
+                            <input type="file" id="model-file-input" name="model_file"
+                                   accept=".pt,.pth" class="form-control form-control-sm model-file-input">
+                            <button type="submit" class="btn btn-success btn-sm" id="upload-btn" disabled>Upload</button>
+                        </form>
+                    </div>
+                    <div id="upload-status" class="d-none card-footer small"></div>
+                </div>
+            </div>
+
+            {% if not model_status['exists'] %}
+            <div class="sidebar-section">
+                <div class="alert alert-warning mb-0 small" role="alert">
+                    No trained model found. Upload one above or add a <code>.pt</code> file to <code>models/</code>.
+                </div>
+            </div>
+            {% endif %}
+
+            <div class="sidebar-section d-flex align-items-center justify-content-between">
+                <h6 class="text-muted text-uppercase small mb-0">Select Images</h6>
+                <span id="selection-info" class="d-none">
+                    <span class="badge bg-success" id="selection-count"></span>
+                    <a href="#" class="text-muted small ms-1" id="clear-selection" onclick="clearSelection(); return false;">Clear</a>
+                </span>
+            </div>
+
+            <div class="gallery-grid">
+                {% for sample in samples %}
+                <div class="gallery-item" data-image-id="{{ sample['id'] }}"
+                     onclick="selectImage({{ sample['id'] }})">
+                    <img src="{{ url_for('static', filename=sample['path'].replace('static/', '')) }}"
+                         alt="Sample {{ sample['id'] }}">
+                    <span class="gallery-label">{{ sample['label'] }}</span>
+                </div>
+                {% endfor %}
+            </div>
+
+            {% if samples|length == 0 %}
+            <div class="sidebar-section">
+                <div class="alert alert-info mb-0 small" role="alert">
+                    No sample images available.
+                </div>
+            </div>
+            {% endif %}
+        </aside>
+
+        <!-- Main panel: visualization -->
+        <main class="main-panel" id="main-panel">
+            <!-- Placeholder shown when no image is selected -->
+            <div id="placeholder" class="placeholder-message">
+                <div class="text-center">
+                    <h4 class="text-muted mb-2">No image selected</h4>
+                    <p class="text-muted small">Click an image in the sidebar to visualize its activations</p>
+                </div>
+            </div>
+
+            <!-- Loading spinner -->
+            <div id="loading" class="placeholder-message d-none">
+                <div class="text-center">
+                    <div class="spinner-border text-success mb-3" role="status"></div>
+                    <p class="text-muted small">Computing activations&hellip;</p>
+                </div>
+            </div>
+
+            <!-- Visualization content (hidden until loaded) -->
+            <div id="viz-content" class="d-none">
+                <div class="viz-header d-flex align-items-center gap-3 mb-3">
+                    <div class="viz-thumbs" id="viz-images"></div>
+                    <div>
+                        <span class="text-white fw-bold" id="viz-label"></span>
+                        <span class="text-muted small ms-2" id="viz-id"></span>
+                    </div>
+                </div>
+
+                <ul class="nav nav-tabs" id="vizTab" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active" id="network-tab" data-bs-toggle="tab"
+                                data-bs-target="#network" type="button" role="tab">
+                            Network Graph
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="heatmap-tab" data-bs-toggle="tab"
+                                data-bs-target="#heatmap" type="button" role="tab">
+                            Layer Heatmaps
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="arch-tab" data-bs-toggle="tab"
+                                data-bs-target="#architecture" type="button" role="tab">
+                            Architecture
+                        </button>
+                    </li>
+                </ul>
+
+                <div class="tab-content" id="vizTabContent">
+                    <div class="tab-pane fade show active" id="network" role="tabpanel">
+                        <div class="card bg-dark text-white mt-3">
+                            <div class="card-header">
+                                <h5>Network Activation Graph</h5>
+                                <small class="text-muted">Green intensity represents activation strength</small>
+                            </div>
+                            <div class="card-body" id="network-graph-container"></div>
+                        </div>
+                    </div>
+
+                    <div class="tab-pane fade" id="heatmap" role="tabpanel">
+                        <div class="card bg-dark text-white mt-3">
+                            <div class="card-header">
+                                <h5>Layer-wise Activation Heatmaps</h5>
+                                <small class="text-muted">Each heatmap shows activation values for all neurons in a layer</small>
+                            </div>
+                            <div class="card-body heatmaps-container" id="heatmaps-container"></div>
+                        </div>
+                    </div>
+
+                    <div class="tab-pane fade" id="architecture" role="tabpanel">
+                        <div class="card bg-dark text-white mt-3">
+                            <div class="card-header">
+                                <h5>About the Visualization</h5>
+                            </div>
+                            <div class="card-body" id="arch-container">
+                                {% if model_status.get('model_type') == 'kan_cnn' %}
+                                <h6 class="text-success">Network Architecture (KAN-CNN):</h6>
+                                <ul>
+                                    <li><strong>Conv 1:</strong> 1 &rarr; 32 channels, 3x3 kernel + BatchNorm + MaxPool</li>
+                                    <li><strong>Conv 2:</strong> 32 &rarr; 64 channels, 3x3 kernel + BatchNorm + MaxPool</li>
+                                    <li><strong>Conv 3:</strong> 64 &rarr; 128 channels, 3x3 kernel + BatchNorm + MaxPool</li>
+                                    <li><strong>Conv 4:</strong> 128 &rarr; 256 channels, 3x3 kernel + BatchNorm</li>
+                                    <li><strong>KAN Inner:</strong> 256 &rarr; 64 with B-spline activation</li>
+                                    <li><strong>KAN Outer:</strong> 64 &rarr; 32 with B-spline activation</li>
+                                </ul>
+                                {% elif model_status.get('model_type') == 'baseline_cnn' %}
+                                <h6 class="text-success">Network Architecture (Baseline CNN):</h6>
+                                <ul>
+                                    <li><strong>Conv 1:</strong> 1 &rarr; 64 channels, 3x3 kernel + BatchNorm + ReLU</li>
+                                    <li><strong>Conv 2:</strong> 64 &rarr; 128 channels, 5x5 kernel + BatchNorm + MaxPool</li>
+                                    <li><strong>Conv 3:</strong> 128 &rarr; 256 channels, 3x3 kernel + BatchNorm + MaxPool</li>
+                                    <li><strong>Conv 4:</strong> 256 &rarr; 512 channels, 3x3 kernel + BatchNorm</li>
+                                    <li><strong>FC 1:</strong> 512 &rarr; 384 + ReLU</li>
+                                    <li><strong>FC 2:</strong> 384 &rarr; 256 + ReLU</li>
+                                    <li><strong>FC Out:</strong> 256 &rarr; 10</li>
+                                </ul>
+                                {% elif model_status.get('model_type') == 'plain_mlp' %}
+                                <h6 class="text-success">Network Architecture (Plain MLP):</h6>
+                                <ul>
+                                    <li><strong>FC 1:</strong> 784 &rarr; 512 + BatchNorm + ReLU</li>
+                                    <li><strong>FC 2:</strong> 512 &rarr; 256 + BatchNorm + ReLU</li>
+                                    <li><strong>FC 3:</strong> 256 &rarr; 128 + BatchNorm + ReLU</li>
+                                    <li><strong>FC Out:</strong> 128 &rarr; 10</li>
+                                </ul>
+                                {% elif model_status.get('model_type') == 'plain_kan' %}
+                                <h6 class="text-success">Network Architecture (Plain KAN):</h6>
+                                <ul>
+                                    <li><strong>KAN Inner:</strong> 784 &rarr; 128 with B-spline activation</li>
+                                    <li><strong>KAN Outer:</strong> 128 &rarr; 64 with B-spline activation</li>
+                                    <li><strong>Classifier:</strong> 64 &rarr; 10</li>
+                                </ul>
+                                {% else %}
+                                <h6 class="text-success">Network Architecture:</h6>
+                                <p class="text-muted">Upload a model to see its architecture details.</p>
+                                {% endif %}
+                                <h6 class="text-success mt-3">Color Scale:</h6>
+                                <p>
+                                    <span class="badge" style="background-color: #001a00;">Low</span>
+                                    <span class="badge" style="background-color: #003300;">&darr;</span>
+                                    <span class="badge" style="background-color: #006600;">Medium</span>
+                                    <span class="badge" style="background-color: #00cc00;">&uarr;</span>
+                                    <span class="badge" style="background-color: #00ff00;">High</span>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let selectedImageIds = [];
+
+        /* ── Helper to execute scripts in inserted HTML ──── */
+        function executeScripts(container) {
+            var scripts = container.querySelectorAll('script');
+            scripts.forEach(function(oldScript) {
+                var newScript = document.createElement('script');
+                if (oldScript.src) {
+                    newScript.src = oldScript.src;
+                } else {
+                    newScript.textContent = oldScript.textContent;
+                }
+                if (oldScript.type) {
+                    newScript.type = oldScript.type;
+                }
+                oldScript.parentNode.replaceChild(newScript, oldScript);
+            });
+        }
+
+        /* ── Selection state helpers ───────────────────────── */
+        function updateSelectionUI() {
+            var selectionInfo = document.getElementById('selection-info');
+            var selectionCount = document.getElementById('selection-count');
+
+            document.querySelectorAll('.gallery-item').forEach(function(el) {
+                el.classList.toggle(
+                    'active',
+                    selectedImageIds.indexOf(Number(el.dataset.imageId)) !== -1
+                );
+            });
+
+            if (selectedImageIds.length > 0) {
+                selectionInfo.classList.remove('d-none');
+                selectionCount.textContent = selectedImageIds.length + ' selected';
+            } else {
+                selectionInfo.classList.add('d-none');
+            }
+        }
+
+        function clearSelection() {
+            selectedImageIds = [];
+            updateSelectionUI();
+
+            var placeholder = document.getElementById('placeholder');
+            var vizContent = document.getElementById('viz-content');
+            var loading = document.getElementById('loading');
+
+            if (loading) loading.classList.add('d-none');
+            if (vizContent) vizContent.classList.add('d-none');
+            if (placeholder) placeholder.classList.remove('d-none');
+        }
+
+        /* ── Render returned visualization data ────────────── */
+        function renderVisualization(data) {
+            var loading = document.getElementById('loading');
+            var placeholder = document.getElementById('placeholder');
+            var vizContent = document.getElementById('viz-content');
+
+            if (data.error) {
+                if (loading) loading.classList.add('d-none');
+                if (placeholder) placeholder.classList.remove('d-none');
+                alert('Error: ' + data.error);
+                return;
+            }
+
+            var vizImages = document.getElementById('viz-images');
+            var vizLabel = document.getElementById('viz-label');
+            var vizId = document.getElementById('viz-id');
+            var networkContainer = document.getElementById('network-graph-container');
+            var heatmapsContainer = document.getElementById('heatmaps-container');
+
+            var imagePaths = data.image_paths || [data.image_path];
+            var classLabels = data.class_labels || [data.class_label];
+            var imageIds = data.image_ids || [data.image_id];
+
+            if (vizImages) {
+                vizImages.innerHTML = '';
+                imagePaths.forEach(function(p) {
+                    var img = document.createElement('img');
+                    img.src = '/static/' + p.replace('static/', '');
+                    img.alt = 'Selected';
+                    img.className = 'viz-thumb';
+                    vizImages.appendChild(img);
+                });
+            }
+
+            if (vizLabel) {
+                var unique = classLabels.filter(function(v, i, a) { return a.indexOf(v) === i; });
+                if (imageIds.length === 1) {
+                    vizLabel.textContent = 'Class: ' + unique.join(', ');
+                } else {
+                    vizLabel.textContent = 'Class: ' + unique.join(', ')
+                        + ' (' + imageIds.length + ' images averaged)';
+                }
+            }
+
+            if (vizId) {
+                vizId.textContent = imageIds.length === 1
+                    ? '(ID ' + imageIds[0] + ')'
+                    : '(IDs ' + imageIds.join(', ') + ')';
+            }
+
+            if (networkContainer && data.network_graph) {
+                networkContainer.innerHTML = data.network_graph;
+                executeScripts(networkContainer);
+            }
+            if (heatmapsContainer && data.heatmaps) {
+                heatmapsContainer.innerHTML = data.heatmaps;
+                executeScripts(heatmapsContainer);
+            }
+
+            if (vizContent) {
+                vizContent.style.visibility = 'hidden';
+                vizContent.classList.remove('d-none');
+            }
+
+            requestAnimationFrame(function() {
+                var graphs = document.querySelectorAll('.plotly-graph-div');
+                if (typeof Plotly !== 'undefined') {
+                    graphs.forEach(function(graph) {
+                        try { Plotly.Plots.resize(graph); } catch(e) {}
+                    });
+                }
+                window.dispatchEvent(new Event('resize'));
+
+                requestAnimationFrame(function() {
+                    if (vizContent) vizContent.style.visibility = '';
+                    if (loading) loading.classList.add('d-none');
+                });
+            });
+        }
+
+        /* ── Image selection (toggle) & visualization fetch ── */
+        function selectImage(imageId) {
+            var idx = selectedImageIds.indexOf(imageId);
+            if (idx === -1) {
+                selectedImageIds.push(imageId);
+            } else {
+                selectedImageIds.splice(idx, 1);
+            }
+
+            updateSelectionUI();
+
+            if (selectedImageIds.length === 0) {
+                clearSelection();
+                return;
+            }
+
+            var placeholder = document.getElementById('placeholder');
+            var vizContent = document.getElementById('viz-content');
+            var loading = document.getElementById('loading');
+
+            if (placeholder) placeholder.classList.add('d-none');
+            if (vizContent) vizContent.classList.add('d-none');
+            if (loading) loading.classList.remove('d-none');
+
+            if (selectedImageIds.length === 1) {
+                fetch('/api/visualize/' + selectedImageIds[0])
+                    .then(function(r) {
+                        if (!r.ok) throw new Error('HTTP ' + r.status);
+                        return r.json();
+                    })
+                    .then(renderVisualization)
+                    .catch(function(err) {
+                        if (loading) loading.classList.add('d-none');
+                        if (placeholder) placeholder.classList.remove('d-none');
+                        alert('Failed to load visualization: ' + err.message);
+                    });
+            } else {
+                fetch('/api/visualize-multi', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image_ids: selectedImageIds }),
+                })
+                    .then(function(r) {
+                        if (!r.ok) throw new Error('HTTP ' + r.status);
+                        return r.json();
+                    })
+                    .then(renderVisualization)
+                    .catch(function(err) {
+                        if (loading) loading.classList.add('d-none');
+                        if (placeholder) placeholder.classList.remove('d-none');
+                        alert('Failed to load visualization: ' + err.message);
+                    });
+            }
+        }
+
+        /* ── Model upload ──────────────────────────────────── */
+        document.addEventListener('DOMContentLoaded', function() {
+            const fileInput = document.getElementById('model-file-input');
+            const uploadBtn = document.getElementById('upload-btn');
+            const uploadForm = document.getElementById('model-upload-form');
+            const uploadStatus = document.getElementById('upload-status');
+
+            if (fileInput) {
+                fileInput.addEventListener('change', function () {
+                    if (uploadBtn) uploadBtn.disabled = !this.files.length;
+                });
+            }
+
+            if (uploadForm) {
+                uploadForm.addEventListener('submit', function (e) {
+                    e.preventDefault();
+                    const formData = new FormData();
+                    formData.append('model_file', fileInput.files[0]);
+
+                    if (uploadBtn) {
+                        uploadBtn.disabled = true;
+                        uploadBtn.textContent = 'Uploading...';
+                    }
+                    if (uploadStatus) {
+                        uploadStatus.className = 'card-footer small text-info';
+                        uploadStatus.textContent = 'Uploading and loading model...';
+                        uploadStatus.classList.remove('d-none');
+                    }
+
+                    fetch('/api/upload-model', { method: 'POST', body: formData })
+                        .then(function(r) { return r.json(); })
+                        .then(function(data) {
+                            if (data.error) {
+                                if (uploadStatus) {
+                                    uploadStatus.className = 'card-footer small text-danger';
+                                    uploadStatus.textContent = data.error;
+                                }
+                            } else {
+                                if (uploadStatus) {
+                                    uploadStatus.className = 'card-footer small text-success';
+                                    uploadStatus.textContent = data.message;
+                                }
+                                setTimeout(function() { window.location.reload(); }, 1200);
+                            }
+                        })
+                        .catch(function(err) {
+                            if (uploadStatus) {
+                                uploadStatus.className = 'card-footer small text-danger';
+                                uploadStatus.textContent = 'Upload failed: ' + err.message;
+                            }
+                        })
+                        .finally(function() {
+                            if (uploadBtn) {
+                                uploadBtn.disabled = false;
+                                uploadBtn.textContent = 'Upload';
+                            }
+                        });
+                });
+            }
+
+            /* ── Plotly resize on tab switch ───────────────────── */
+            document.querySelectorAll('[data-bs-toggle="tab"]').forEach(function(btn) {
+                btn.addEventListener('shown.bs.tab', function() {
+                    window.dispatchEvent(new Event('resize'));
+                });
+            });
+
+            window.addEventListener('resize', function () {
+                document.querySelectorAll('.plotly-graph-div').forEach(function(g) {
+                    if (typeof Plotly !== 'undefined') {
+                        Plotly.Plots.resize(g);
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html>
